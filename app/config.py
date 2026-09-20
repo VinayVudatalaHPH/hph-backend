@@ -1,0 +1,73 @@
+import os
+
+from dotenv import load_dotenv
+
+load_dotenv()
+
+
+def _env_bool(name, default=False):
+    """Read a boolean environment variable and reject ambiguous values."""
+    raw_value = os.environ.get(name)
+    if raw_value is None:
+        return default
+
+    value = raw_value.strip().lower()
+    if value in {"1", "true", "yes", "on"}:
+        return True
+    if value in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{name} must be one of: true, false, 1, 0, yes, no, on, off")
+
+
+class Config:
+    SQLALCHEMY_DATABASE_URI = os.environ["DATABASE_URL"]
+    SQLALCHEMY_TRACK_MODIFICATIONS = False
+    SECRET_KEY = os.environ["SECRET_KEY"]
+    # Session cookies must be Secure (HTTPS-only) per the doc's "TLS everywhere"
+    # requirement. Defaults to True; only disable for local HTTP-only dev.
+    SESSION_COOKIE_SECURE = _env_bool("SESSION_COOKIE_SECURE", True)
+    TEMP_PASSWORD_EXPIRY_HOURS = int(os.environ.get("TEMP_PASSWORD_EXPIRY_HOURS", "72"))
+
+    # Celery: key-rotation Beat schedule (§4b) and outbound mail (§5).
+    CELERY_BROKER_URL = os.environ.get("CELERY_BROKER_URL", "redis://localhost:6379/0")
+    CELERY_RESULT_BACKEND = os.environ.get("CELERY_RESULT_BACKEND", "redis://localhost:6379/0")
+
+    # §5: Flask-Mail's own expected config keys, entirely env-driven so
+    # switching from local dev (Mailpit) to a real internal SMTP relay in
+    # production is a config change, not a code change to the calling sites.
+    MAIL_SERVER = os.environ.get("EMAIL_HOST", "localhost")
+    MAIL_PORT = int(os.environ.get("EMAIL_PORT", "1025"))
+    MAIL_USE_TLS = _env_bool("EMAIL_USE_TLS")
+    MAIL_USE_SSL = _env_bool("EMAIL_USE_SSL")
+    MAIL_USERNAME = os.environ.get("EMAIL_HOST_USER") or None
+    MAIL_PASSWORD = os.environ.get("EMAIL_HOST_PASSWORD") or None
+    MAIL_DEFAULT_SENDER = os.environ.get("DEFAULT_FROM_EMAIL", "noreply@vitalysehealth.local")
+    # Enable this outside local development so a missing secret/configuration
+    # fails at startup instead of silently trying the local Mailpit defaults.
+    MAIL_VALIDATE_CONFIG = _env_bool("EMAIL_VALIDATE_CONFIG")
+    FRONTEND_LOGIN_URL = os.environ.get("FRONTEND_LOGIN_URL", "http://localhost:5173/login")
+
+    # §4b debug aid: logs each request/response body decrypted - the
+    # plaintext JSON, right after decrypt_request_body / right before
+    # encrypt_response_body - to a running server's console. This includes
+    # request bodies verbatim (e.g. login passwords). Off by default; local
+    # dev only, never enable in production (it's a per-request log line for
+    # every call, and it logs credentials).
+    LOG_DECRYPTED_PAYLOADS = _env_bool("LOG_DECRYPTED_PAYLOADS")
+
+    # The frontend (see ../frontend) is a separate-origin SPA that talks to
+    # this API over a session cookie, so it needs CORS with credentials
+    # enabled — not just a local-dev nicety, most real deployments put the
+    # SPA and API on different (sub)domains too. Comma-separated in env so
+    # prod can list its real frontend origin(s) without a code change.
+    CORS_ALLOWED_ORIGINS = os.environ.get(
+        "CORS_ALLOWED_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173"
+    ).split(",")
+
+    # flask-smorest / OpenAPI
+    API_TITLE = "Vitalyse Health API"
+    API_VERSION = "v1"
+    OPENAPI_VERSION = "3.0.2"
+    OPENAPI_URL_PREFIX = "/"
+    OPENAPI_SWAGGER_UI_PATH = "/swagger-ui"
+    OPENAPI_SWAGGER_UI_URL = "https://cdn.jsdelivr.net/npm/swagger-ui-dist/"

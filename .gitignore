@@ -216,3 +216,22 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# macOS / IDE metadata
+.DS_Store
+.idea/
+.vscode/
+
+# Local application secrets and environment overrides
+.env.*
+!.env.example
+
+# Database exports and Cloud SQL local files
+*.sql
+*.dump
+*.backup
+cloud-sql-proxy
+
+# Local runtime output
+logs/
+*.log
