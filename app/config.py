@@ -1,8 +1,24 @@
 import os
 
 from dotenv import load_dotenv
+from sqlalchemy.engine import URL
 
 load_dotenv()
+
+
+def _database_uri():
+    """Use DATABASE_URL locally or Cloud SQL's Unix socket in Cloud Run."""
+    database_url = os.environ.get("DATABASE_URL")
+    if database_url:
+        return database_url
+
+    return URL.create(
+        drivername="postgresql+psycopg2",
+        username=os.environ["DB_USER"],
+        password=os.environ["DB_PASSWORD"],
+        database=os.environ["DB_NAME"],
+        query={"host": os.environ["INSTANCE_UNIX_SOCKET"]},
+    )
 
 
 def _env_bool(name, default=False):
@@ -20,8 +36,14 @@ def _env_bool(name, default=False):
 
 
 class Config:
-    SQLALCHEMY_DATABASE_URI = os.environ["DATABASE_URL"]
+    SQLALCHEMY_DATABASE_URI = _database_uri()
     SQLALCHEMY_TRACK_MODIFICATIONS = False
+    SQLALCHEMY_ENGINE_OPTIONS = {
+        "pool_pre_ping": True,
+        "pool_recycle": 1800,
+        "pool_size": 5,
+        "max_overflow": 2,
+    }
     SECRET_KEY = os.environ["SECRET_KEY"]
     # Session cookies must be Secure (HTTPS-only) per the doc's "TLS everywhere"
     # requirement. Defaults to True; only disable for local HTTP-only dev.
@@ -31,6 +53,7 @@ class Config:
     # Celery: key-rotation Beat schedule (§4b) and outbound mail (§5).
     CELERY_BROKER_URL = os.environ.get("CELERY_BROKER_URL", "redis://localhost:6379/0")
     CELERY_RESULT_BACKEND = os.environ.get("CELERY_RESULT_BACKEND", "redis://localhost:6379/0")
+    CELERY_TASK_ALWAYS_EAGER = _env_bool("CELERY_TASK_ALWAYS_EAGER")
 
     # §5: Flask-Mail's own expected config keys, entirely env-driven so
     # switching from local dev (Mailpit) to a real internal SMTP relay in
@@ -42,6 +65,7 @@ class Config:
     MAIL_USERNAME = os.environ.get("EMAIL_HOST_USER") or None
     MAIL_PASSWORD = os.environ.get("EMAIL_HOST_PASSWORD") or None
     MAIL_DEFAULT_SENDER = os.environ.get("DEFAULT_FROM_EMAIL", "noreply@vitalysehealth.local")
+    MAIL_SUPPRESS_SEND = _env_bool("EMAIL_SUPPRESS_SEND")
     # Enable this outside local development so a missing secret/configuration
     # fails at startup instead of silently trying the local Mailpit defaults.
     MAIL_VALIDATE_CONFIG = _env_bool("EMAIL_VALIDATE_CONFIG")

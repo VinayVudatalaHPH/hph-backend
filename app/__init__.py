@@ -1,6 +1,6 @@
 import logging
 
-from flask import Flask
+from flask import Flask, jsonify
 from werkzeug.exceptions import HTTPException
 
 from app.config import Config
@@ -91,6 +91,10 @@ def create_app():
     app.before_request(decrypt_request_body)
     app.before_request(load_session)
     app.after_request(encrypt_response_body)
+
+    @app.get("/healthz")
+    def healthcheck():
+        return jsonify({"status": "ok"})
 
     @app.cli.command("rotate-encryption-key")
     def rotate_encryption_key_command():
