@@ -127,6 +127,7 @@ def get_monthly_goal(user, month_value=None):
     target_charts = 0
     eligible_days = 0
     leave_days_excluded = 0
+    targets_by_user = {member.id: 0 for member in members}
     for member in members:
         employment_end = min(month_end, member.last_working_day) if member.last_working_day else month_end
         work_date = month_start
@@ -156,13 +157,16 @@ def get_monthly_goal(user, month_value=None):
                     else:
                         eligible_days += 1
                         target_charts += rule.daily_target
+                        targets_by_user[member.id] += rule.daily_target
             work_date += timedelta(days=1)
 
     completed_through = min(month_end, date.today())
     completed_charts = 0
+    completed_by_user = {}
+    manual_by_user = {}
     if member_ids and completed_through >= month_start:
-        completed_charts = (
-            db.session.query(func.count(KaironChartRecord.id))
+        completed_by_user = dict(
+            db.session.query(KaironChartRecord.user_id, func.count(KaironChartRecord.id))
             .join(KaironUploadBatch, KaironChartRecord.batch_id == KaironUploadBatch.id)
             .join(User, KaironChartRecord.user_id == User.id)
             .filter(
@@ -176,8 +180,22 @@ def get_monthly_goal(user, month_value=None):
                     KaironChartRecord.completed_date <= User.last_working_day,
                 ),
             )
-            .scalar()
-            or 0
+            .group_by(KaironChartRecord.user_id)
+            .all()
+        )
+        completed_charts = sum(completed_by_user.values())
+        manual_by_user = dict(
+            db.session.query(ManualDailyRecord.user_id, func.sum(ManualDailyRecord.production_count))
+            .join(User, ManualDailyRecord.user_id == User.id)
+            .filter(
+                ManualDailyRecord.user_id.in_(member_ids),
+                ManualDailyRecord.status != "rejected",
+                ManualDailyRecord.record_date >= month_start,
+                ManualDailyRecord.record_date <= completed_through,
+                db.or_(User.last_working_day.is_(None), ManualDailyRecord.record_date <= User.last_working_day),
+            )
+            .group_by(ManualDailyRecord.user_id)
+            .all()
         )
 
     calendar_working_days = sum(
@@ -191,6 +209,18 @@ def get_monthly_goal(user, month_value=None):
         "scope": "team" if role_type == "lead" else "self",
         "user_count": len(members),
         "completed_charts": completed_charts,
+        "manual_charts": sum(manual_by_user.values()),
+        "users": [
+            {
+                "user_id": member.id,
+                "name": f"{member.first_name} {member.last_name}".strip(),
+                "manual_charts": manual_by_user.get(member.id, 0),
+                "completed_charts": completed_by_user.get(member.id, 0),
+                "target_charts": targets_by_user[member.id],
+                "difference": targets_by_user[member.id] - completed_by_user.get(member.id, 0),
+            }
+            for member in members
+        ],
         "target_charts": target_charts,
         "difference": target_charts - completed_charts,
         "calendar_working_days": calendar_working_days,

@@ -225,12 +225,21 @@ def test_monthly_goal_for_lead_includes_lead_and_direct_reports():
         )
         db.session.commit()
 
+        upsert_own_record(lead.id, _manual_entry(record_date=dt.date(2026, 9, 10), production_count=12))
+        upsert_own_record(coder.id, _manual_entry(record_date=dt.date(2026, 9, 10), production_count=25))
+        db.session.commit()
         result = get_monthly_goal(lead, "2026-09")
         assert result["scope"] == "team"
         assert result["user_count"] == 2
         assert result["calendar_working_days"] == 21
         assert result["eligible_days"] == 42
         assert result["target_charts"] == 1260
+        assert result["manual_charts"] == 37
+        rows = {row["user_id"]: row for row in result["users"]}
+        assert rows[lead.id]["manual_charts"] == 12
+        assert rows[coder.id]["manual_charts"] == 25
+        assert sum(row["target_charts"] for row in rows.values()) == result["target_charts"]
+        assert sum(row["completed_charts"] for row in rows.values()) == result["completed_charts"]
     finally:
         coder.reports_to_id = original_reports_to
         db.session.commit()

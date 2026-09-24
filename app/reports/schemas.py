@@ -154,7 +154,18 @@ class MonthlyGoalQuerySchema(Schema):
     month = fields.String(required=False, load_default=None, validate=validate.Regexp(r"^\d{4}-\d{2}$"))
 
 
+class MonthlyGoalUserSchema(Schema):
+    user_id = fields.Integer(dump_only=True, data_key="userId")
+    name = fields.String(dump_only=True)
+    manual_charts = fields.Integer(dump_only=True, data_key="manualCharts")
+    completed_charts = fields.Integer(dump_only=True, data_key="completedCharts")
+    target_charts = fields.Integer(dump_only=True, data_key="targetCharts")
+    difference = fields.Integer(dump_only=True)
+
+
 class MonthlyGoalSchema(Schema):
+    manual_charts = fields.Integer(dump_only=True, data_key="manualCharts")
+    users = fields.List(fields.Nested(MonthlyGoalUserSchema), dump_only=True)
     month = fields.String(dump_only=True)
     scope = fields.String(dump_only=True)
     user_count = fields.Integer(dump_only=True, data_key="userCount")
