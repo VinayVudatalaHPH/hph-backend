@@ -16,6 +16,7 @@ from app.reports.services import (
     bulk_reject_manual_records,
     get_efficiency,
     get_coding_dashboard,
+    get_monthly_goal,
     resolve_dashboard_window,
 )
 from app.roles.models import Role, RoleType
@@ -141,6 +142,98 @@ def test_resolve_dashboard_window_rejects_invalid_month():
     with pytest.raises(HTTPException) as exc_info:
         resolve_dashboard_window({"month": "2026-13"})
     assert exc_info.value.code == 400
+
+
+def test_monthly_goal_excludes_weekends_holiday_and_full_leave_day():
+    user = _get_or_create_user(
+        "reports-monthly-goal@example.com", "Monthly", "Goal", "TEST-RPT-MONTHLY-GOAL"
+    )
+    manager_id = _first_manager_id()
+    db.session.add(
+        UserStagePeriod(
+            user_id=user.id,
+            stage_code="Steady State",
+            start_date=dt.date(2026, 9, 1),
+            end_date=None,
+            source="manual_override",
+            shifted_by_exception_days=0,
+        )
+    )
+    import_batch(
+        dt.date(2026, 9, 20),
+        [
+            _kairon_row(user, "Completed", completed_date=dt.date(2026, 9, 10)),
+            _kairon_row(user, "Completed", completed_date=dt.date(2026, 9, 20)),
+        ],
+        uploaded_by_id=manager_id,
+    )
+    db.session.commit()
+
+    result = get_monthly_goal(user, "2026-09")
+    assert result["calendar_working_days"] == 21
+    assert result["eligible_days"] == 21
+    assert result["holiday_count"] == 1
+    assert result["target_charts"] == 630
+    assert result["completed_charts"] == 2
+    assert result["difference"] == 628
+
+    upsert_own_record(
+        user.id,
+        _manual_entry(
+            record_date=dt.date(2026, 9, 15),
+            production_count=0,
+            leave_hours=8,
+        ),
+    )
+    db.session.commit()
+
+    result = get_monthly_goal(user, "2026-09")
+    assert result["eligible_days"] == 20
+    assert result["leave_days_excluded"] == 1
+    assert result["target_charts"] == 600
+
+
+def test_monthly_goal_for_lead_includes_lead_and_direct_reports():
+    lead = _get_or_create_user(
+        "reports-monthly-lead@example.com",
+        "Monthly",
+        "Lead",
+        "TEST-RPT-MONTHLY-LEAD",
+        "lead",
+    )
+    coder = _get_or_create_user(
+        "reports-monthly-coder@example.com",
+        "Monthly",
+        "Coder",
+        "TEST-RPT-MONTHLY-CODER",
+    )
+    original_reports_to = coder.reports_to_id
+    try:
+        coder.reports_to_id = lead.id
+        db.session.add_all(
+            [
+                UserStagePeriod(
+                    user_id=member.id,
+                    stage_code="Steady State",
+                    start_date=dt.date(2026, 9, 1),
+                    end_date=None,
+                    source="manual_override",
+                    shifted_by_exception_days=0,
+                )
+                for member in (lead, coder)
+            ]
+        )
+        db.session.commit()
+
+        result = get_monthly_goal(lead, "2026-09")
+        assert result["scope"] == "team"
+        assert result["user_count"] == 2
+        assert result["calendar_working_days"] == 21
+        assert result["eligible_days"] == 42
+        assert result["target_charts"] == 1260
+    finally:
+        coder.reports_to_id = original_reports_to
+        db.session.commit()
 
 
 def test_efficiency_prorates_target_caps_overtime_and_caps_display(employee_user, manager_user):

@@ -23,6 +23,8 @@ from app.reports.schemas import (
     KaironRecordPageEnvelopeSchema,
     ManualRecordPageEnvelopeSchema,
     ManualReviewQuerySchema,
+    MonthlyGoalEnvelopeSchema,
+    MonthlyGoalQuerySchema,
     PaginationQuerySchema,
     SelfKaironChartQuerySchema,
     SelfManualRecordsQuerySchema,
@@ -33,6 +35,7 @@ from app.reports.services import (
     get_efficiency,
     get_coding_dashboard,
     resolve_dashboard_window,
+    get_monthly_goal,
 )
 from app.users.hierarchy import manager_lead_team_user_ids, manager_team_user_ids
 from app.users.models import User
@@ -310,3 +313,14 @@ class MyEfficiencyDashboard(MethodView):
             abort(400, message="from must be on or before to.")
         efficiency = get_efficiency([g.user.id], from_date, to_date, include_daily=True)[g.user.id]
         return {"status": 200, "message": "Your efficiency retrieved successfully.", "data": efficiency}
+
+
+@bp.route("/dashboards/monthly-goal")
+class MonthlyGoalDashboard(MethodView):
+    @require_feature("dashboard")
+    @require_role_types("lead", "employee")
+    @bp.arguments(MonthlyGoalQuerySchema, location="query")
+    @bp.response(200, MonthlyGoalEnvelopeSchema)
+    def get(self, args):
+        result = get_monthly_goal(g.user, args.get("month"))
+        return {"status": 200, "message": "Monthly chart goal retrieved successfully.", "data": result}

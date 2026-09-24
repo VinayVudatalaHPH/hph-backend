@@ -59,6 +59,7 @@ def create_app():
     from app.kairon import models as kairon_models  # noqa: F401
     from app.manual_daily_records import models as manual_daily_records_models  # noqa: F401
     from app.login_hours import models as login_hours_models  # noqa: F401
+    from app.reports import models as reports_models  # noqa: F401
 
     # blueprints (flask-smorest Blueprints; each declares its own url_prefix)
     from app.roles import bp as roles_bp

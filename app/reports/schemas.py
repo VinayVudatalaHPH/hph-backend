@@ -150,6 +150,23 @@ class EfficiencyQuerySchema(Schema):
     year = fields.Integer(required=False, load_default=None, validate=validate.Range(min=2000, max=2100))
 
 
+class MonthlyGoalQuerySchema(Schema):
+    month = fields.String(required=False, load_default=None, validate=validate.Regexp(r"^\d{4}-\d{2}$"))
+
+
+class MonthlyGoalSchema(Schema):
+    month = fields.String(dump_only=True)
+    scope = fields.String(dump_only=True)
+    user_count = fields.Integer(dump_only=True, data_key="userCount")
+    completed_charts = fields.Integer(dump_only=True, data_key="completedCharts")
+    target_charts = fields.Integer(dump_only=True, data_key="targetCharts")
+    difference = fields.Integer(dump_only=True)
+    calendar_working_days = fields.Integer(dump_only=True, data_key="calendarWorkingDays")
+    eligible_days = fields.Integer(dump_only=True, data_key="eligibleDays")
+    holiday_count = fields.Integer(dump_only=True, data_key="holidayCount")
+    leave_days_excluded = fields.Integer(dump_only=True, data_key="leaveDaysExcluded")
+
+
 class CodingDashboardKaironSchema(Schema):
     active = fields.Integer(dump_only=True)
     on_hold = fields.Integer(dump_only=True, data_key="onHold")
@@ -244,6 +261,9 @@ CodingDashboardEnvelopeSchema = envelope_schema(
 )
 EfficiencySummaryEnvelopeSchema = envelope_schema(
     "EfficiencySummaryEnvelopeSchema", fields.Nested(EfficiencySummarySchema)
+)
+MonthlyGoalEnvelopeSchema = envelope_schema(
+    "MonthlyGoalEnvelopeSchema", fields.Nested(MonthlyGoalSchema)
 )
 KaironRecordPageEnvelopeSchema = envelope_schema(
     "KaironRecordPageEnvelopeSchema", fields.Nested(KaironRecordPageSchema)

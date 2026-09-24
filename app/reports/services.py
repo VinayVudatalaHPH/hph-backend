@@ -3,7 +3,7 @@ project dashboard - no new source-of-truth tables, everything here reads
 or updates rows already owned by app.kairon and app.manual_daily_records.
 """
 import calendar
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal, ROUND_HALF_UP
 
 from flask_smorest import abort
@@ -15,6 +15,7 @@ from app.kairon.models import KaironChartRecord, KaironUploadBatch
 from app.login_hours.models import LoginHourRecord
 from app.manual_daily_records.models import ManualDailyRecord
 from app.manual_daily_records.services import approve_record, reject_record
+from app.reports.models import OfficeHoliday
 from app.roles.models import Role, RoleType
 from app.users.models import Project, User
 
@@ -50,6 +51,153 @@ def _manual_count(record, program=None):
     if program == "FOUNDATION":
         return record.foundation_count
     return record.production_count
+
+
+def _month_window(month_value=None):
+    today = date.today()
+    if month_value:
+        try:
+            year, month = (int(part) for part in month_value.split("-"))
+            first = date(year, month, 1)
+        except (AttributeError, TypeError, ValueError):
+            abort(400, message="month must be a valid 'YYYY-MM' value.")
+    else:
+        first = today.replace(day=1)
+    return first, date(first.year, first.month, calendar.monthrange(first.year, first.month)[1])
+
+
+def get_monthly_goal(user, month_value=None):
+    """Return the calendar-month completed-chart goal for an employee or lead.
+
+    Weekends and configured office holidays never carry target. A manual
+    record with eight or more leave hours removes that user's target for the
+    day. Stage targets remain date-effective, so a mid-month stage change is
+    reflected without rewriting history. Leads aggregate themselves and
+    their direct reports; employees are always self-scoped.
+    """
+    month_start, month_end = _month_window(month_value)
+    role_type = user.role.role_type.code
+    members = [user]
+    if role_type == "lead":
+        members.extend(user.direct_reports)
+
+    # Do not carry people into a month that begins after their employment.
+    members = [
+        member
+        for member in members
+        if member.last_working_day is None or member.last_working_day >= month_start
+    ]
+    member_ids = [member.id for member in members]
+    holidays = {
+        row.holiday_date
+        for row in OfficeHoliday.query.filter(
+            OfficeHoliday.holiday_date >= month_start,
+            OfficeHoliday.holiday_date <= month_end,
+        ).all()
+    }
+    weekday_holidays = {day for day in holidays if day.weekday() < 5}
+
+    periods = UserStagePeriod.query.filter(
+        UserStagePeriod.user_id.in_(member_ids),
+        UserStagePeriod.start_date <= month_end,
+        db.or_(UserStagePeriod.end_date.is_(None), UserStagePeriod.end_date >= month_start),
+    ).all() if member_ids else []
+    rules = StageTargetRule.query.filter(
+        StageTargetRule.effective_from <= month_end,
+        db.or_(StageTargetRule.effective_to.is_(None), StageTargetRule.effective_to > month_start),
+    ).all()
+    full_leave_days = {
+        (row.user_id, row.record_date)
+        for row in ManualDailyRecord.query.filter(
+            ManualDailyRecord.user_id.in_(member_ids),
+            ManualDailyRecord.record_date >= month_start,
+            ManualDailyRecord.record_date <= month_end,
+            ManualDailyRecord.status != "rejected",
+            ManualDailyRecord.leave_hours >= Decimal("8"),
+        ).all()
+    } if member_ids else set()
+
+    periods_by_user = {}
+    for period in periods:
+        periods_by_user.setdefault(period.user_id, []).append(period)
+    rules_by_stage = {}
+    for rule in rules:
+        rules_by_stage.setdefault(rule.stage_code, []).append(rule)
+
+    target_charts = 0
+    eligible_days = 0
+    leave_days_excluded = 0
+    for member in members:
+        employment_end = min(month_end, member.last_working_day) if member.last_working_day else month_end
+        work_date = month_start
+        while work_date <= employment_end:
+            if work_date.weekday() < 5 and work_date not in holidays:
+                period = next(
+                    (
+                        item
+                        for item in periods_by_user.get(member.id, [])
+                        if item.start_date <= work_date
+                        and (item.end_date is None or item.end_date >= work_date)
+                    ),
+                    None,
+                )
+                rule = next(
+                    (
+                        item
+                        for item in rules_by_stage.get(period.stage_code if period else None, [])
+                        if item.effective_from <= work_date
+                        and (item.effective_to is None or item.effective_to > work_date)
+                    ),
+                    None,
+                )
+                if rule is not None:
+                    if (member.id, work_date) in full_leave_days:
+                        leave_days_excluded += 1
+                    else:
+                        eligible_days += 1
+                        target_charts += rule.daily_target
+            work_date += timedelta(days=1)
+
+    completed_through = min(month_end, date.today())
+    completed_charts = 0
+    if member_ids and completed_through >= month_start:
+        completed_charts = (
+            db.session.query(func.count(KaironChartRecord.id))
+            .join(KaironUploadBatch, KaironChartRecord.batch_id == KaironUploadBatch.id)
+            .join(User, KaironChartRecord.user_id == User.id)
+            .filter(
+                KaironUploadBatch.superseded_at.is_(None),
+                KaironChartRecord.status == "Completed",
+                KaironChartRecord.user_id.in_(member_ids),
+                KaironChartRecord.completed_date >= month_start,
+                KaironChartRecord.completed_date <= completed_through,
+                db.or_(
+                    User.last_working_day.is_(None),
+                    KaironChartRecord.completed_date <= User.last_working_day,
+                ),
+            )
+            .scalar()
+            or 0
+        )
+
+    calendar_working_days = sum(
+        1
+        for offset in range((month_end - month_start).days + 1)
+        if (month_start + timedelta(days=offset)).weekday() < 5
+        and (month_start + timedelta(days=offset)) not in holidays
+    )
+    return {
+        "month": month_start.strftime("%Y-%m"),
+        "scope": "team" if role_type == "lead" else "self",
+        "user_count": len(members),
+        "completed_charts": completed_charts,
+        "target_charts": target_charts,
+        "difference": target_charts - completed_charts,
+        "calendar_working_days": calendar_working_days,
+        "eligible_days": eligible_days,
+        "holiday_count": len(weekday_holidays),
+        "leave_days_excluded": leave_days_excluded,
+    }
 
 
 def get_efficiency(user_ids, from_date, to_date, include_daily=False, program=None):
