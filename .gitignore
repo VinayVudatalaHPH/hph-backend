@@ -225,6 +225,7 @@ __marimo__/
 # Local application secrets and environment overrides
 .env.*
 !.env.example
+!.env.render.example
 
 # Database exports and Cloud SQL local files
 *.sql

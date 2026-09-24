@@ -1,0 +1,59 @@
+services:
+  - type: web
+    name: hph-backend
+    runtime: docker
+    plan: free
+    region: singapore
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /healthz
+    autoDeployTrigger: commit
+    envVars:
+      - key: DATABASE_URL
+        sync: false
+      - key: SECRET_KEY
+        sync: false
+      - key: ENCRYPTION_MASTER_KEY
+        sync: false
+      - key: KAIRON_IDENTITY_KEY
+        sync: false
+      - key: SESSION_COOKIE_SECURE
+        value: "true"
+      - key: TEMP_PASSWORD_EXPIRY_HOURS
+        value: "72"
+      - key: CELERY_BROKER_URL
+        value: redis://localhost:6379/0
+      - key: CELERY_RESULT_BACKEND
+        value: redis://localhost:6379/0
+      - key: CELERY_TASK_ALWAYS_EAGER
+        value: "true"
+      - key: EMAIL_HOST
+        value: localhost
+      - key: EMAIL_PORT
+        value: "1025"
+      - key: EMAIL_USE_TLS
+        value: "false"
+      - key: EMAIL_USE_SSL
+        value: "false"
+      - key: EMAIL_HOST_USER
+        value: ""
+      - key: EMAIL_HOST_PASSWORD
+        value: ""
+      - key: DEFAULT_FROM_EMAIL
+        value: noreply@vitalysehealth.local
+      - key: EMAIL_SUPPRESS_SEND
+        value: "true"
+      - key: EMAIL_VALIDATE_CONFIG
+        value: "false"
+      - key: FRONTEND_LOGIN_URL
+        value: https://hph-frontend-668900523842.asia-south1.run.app/login
+      - key: LOG_DECRYPTED_PAYLOADS
+        value: "false"
+      - key: CORS_ALLOWED_ORIGINS
+        value: https://hph-frontend-668900523842.asia-south1.run.app
+      - key: WEB_CONCURRENCY
+        value: "2"
+      - key: GUNICORN_THREADS
+        value: "4"
+      - key: GUNICORN_TIMEOUT
+        value: "120"

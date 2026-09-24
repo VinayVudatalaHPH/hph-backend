@@ -61,6 +61,26 @@ All blueprints are mounted under the `/api` prefix (see `app/__init__.py`).
    python run.py
    ```
 
+## Deploy to Render
+
+The repository includes a `render.yaml` Blueprint for a Docker-based web
+service in Render's Singapore region. Render supplies `PORT`; Gunicorn already
+binds to it, and Render checks `/healthz` before routing traffic to a deploy.
+The Blueprint starts on Render's free plan to avoid creating a charge; select a
+paid always-on plan before treating Render as the production cutover target.
+
+1. Create a Render Blueprint from this repository.
+2. Supply the four values marked `sync: false` from the production secret
+   store. Use the Supabase **session pooler** URL on port `5432` with
+   `sslmode=require`; Render's outbound network is IPv4-only.
+3. Keep the existing Cloud Run service available until the Render health and
+   authenticated API checks pass and the frontend proxy is switched.
+
+For local verification, copy `.env.render.example` to `.env.render` and fill in
+the real values. If you have access to the `hph-inhouse` GCP project, run
+`./scripts/export_render_env.sh` to copy the existing production values without
+printing them. `.env.render` is ignored by Git and must never be committed.
+
 ## Email delivery
 
 Mail is rendered by the API and queued in Redis; a separate Celery worker
