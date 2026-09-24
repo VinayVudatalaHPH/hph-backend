@@ -65,16 +65,31 @@ def get_efficiency(user_ids, from_date, to_date, include_daily=False, program=No
     if not user_ids:
         return {}
 
+    employment_end_by_user = {
+        user.id: user.last_working_day
+        for user in User.query.filter(User.id.in_(user_ids)).all()
+    }
+
+    def within_employment(user_id, work_date):
+        employment_end = employment_end_by_user.get(user_id)
+        return employment_end is None or work_date <= employment_end
+
     login_rows = LoginHourRecord.query.filter(
         LoginHourRecord.user_id.in_(user_ids),
         LoginHourRecord.attendance_date >= from_date,
         LoginHourRecord.attendance_date <= to_date,
     ).all()
+    login_rows = [
+        row for row in login_rows if within_employment(row.user_id, row.attendance_date)
+    ]
     manual_rows = ManualDailyRecord.query.filter(
         ManualDailyRecord.user_id.in_(user_ids),
         ManualDailyRecord.record_date >= from_date,
         ManualDailyRecord.record_date <= to_date,
     ).all()
+    manual_rows = [
+        row for row in manual_rows if within_employment(row.user_id, row.record_date)
+    ]
     kairon_query = (
         db.session.query(
             KaironChartRecord.user_id,
@@ -82,12 +97,17 @@ def get_efficiency(user_ids, from_date, to_date, include_daily=False, program=No
             func.count(KaironChartRecord.id),
         )
         .join(KaironUploadBatch, KaironChartRecord.batch_id == KaironUploadBatch.id)
+        .join(User, KaironChartRecord.user_id == User.id)
         .filter(
             KaironUploadBatch.superseded_at.is_(None),
             KaironChartRecord.status == "Completed",
             KaironChartRecord.user_id.in_(user_ids),
             KaironChartRecord.completed_date >= from_date,
             KaironChartRecord.completed_date <= to_date,
+            db.or_(
+                User.last_working_day.is_(None),
+                KaironChartRecord.completed_date <= User.last_working_day,
+            ),
         )
     )
     if program:
@@ -333,10 +353,11 @@ def bulk_reject_manual_records(items, reviewed_by_id):
 
 
 def get_coding_dashboard(from_date, to_date, program=None, lead_id=None, cohort_id=None, include_daily=False):
-    """One card per active user for the given window (§4.4): Kairon chart
+    """One card per historically eligible user for the given window (§4.4): Kairon chart
     counts include completed charts only, scoped by each chart's completed
     date. Manual production/hours/pending totals are scoped by each record's
-    own record_date.
+    own record_date. Inactive users remain visible for periods that overlap
+    their employment, and their metrics stop on their last working day.
     """
     # The dashboard population is the operational coder definition, not
     # every active account in the application. Leads are production coders
@@ -346,7 +367,6 @@ def get_coding_dashboard(from_date, to_date, program=None, lead_id=None, cohort_
         .join(RoleType)
         .join(Project)
         .filter(
-            User.is_active.is_(True),
             Project.name == "CODING",
             RoleType.code.in_(("lead", "employee")),
         )
@@ -365,25 +385,72 @@ def get_coding_dashboard(from_date, to_date, program=None, lead_id=None, cohort_
         lead = (
             User.query.join(Role)
             .join(RoleType)
-            .filter(User.id == lead_id, User.is_active.is_(True), RoleType.code == "lead")
+            .filter(User.id == lead_id, RoleType.code == "lead")
             .first()
         )
         if lead is None:
-            abort(400, message="leadId must reference an active lead.")
-        scoped_user_ids = [lead.id, *[user.id for user in lead.direct_reports if user.is_active]]
+            abort(400, message="leadId must reference a lead.")
+        scoped_user_ids = [lead.id, *[user.id for user in lead.direct_reports]]
         users_query = users_query.filter(User.id.in_(scoped_user_ids))
 
-    users = users_query.order_by(User.first_name, User.last_name).all()
+    candidate_users = users_query.all()
+    candidate_user_ids = [user.id for user in candidate_users]
+    activity_user_ids = set()
+    if candidate_user_ids:
+        activity_user_ids.update(
+            user_id
+            for (user_id,) in db.session.query(ManualDailyRecord.user_id)
+            .filter(
+                ManualDailyRecord.user_id.in_(candidate_user_ids),
+                ManualDailyRecord.record_date >= from_date,
+                ManualDailyRecord.record_date <= to_date,
+            )
+            .distinct()
+            .all()
+        )
+        activity_user_ids.update(
+            user_id
+            for (user_id,) in db.session.query(KaironChartRecord.user_id)
+            .join(KaironUploadBatch, KaironChartRecord.batch_id == KaironUploadBatch.id)
+            .filter(
+                KaironUploadBatch.superseded_at.is_(None),
+                KaironChartRecord.user_id.in_(candidate_user_ids),
+                KaironChartRecord.completed_date >= from_date,
+                KaironChartRecord.completed_date <= to_date,
+            )
+            .distinct()
+            .all()
+        )
+
+    users = sorted(
+        (
+            user
+            for user in candidate_users
+            if user.is_active
+            or (user.last_working_day is not None and user.last_working_day >= from_date)
+            or (user.last_working_day is None and user.id in activity_user_ids)
+        ),
+        key=lambda user: (
+            not user.is_active,
+            (user.first_name or "").casefold(),
+            (user.last_name or "").casefold(),
+        ),
+    )
     user_ids = [user.id for user in users]
 
     kairon_query = (
         db.session.query(KaironChartRecord.user_id, KaironChartRecord.status, func.count(KaironChartRecord.id))
         .join(KaironUploadBatch, KaironChartRecord.batch_id == KaironUploadBatch.id)
+        .join(User, KaironChartRecord.user_id == User.id)
         .filter(
             KaironUploadBatch.superseded_at.is_(None),
             KaironChartRecord.status == "Completed",
             KaironChartRecord.completed_date >= from_date,
             KaironChartRecord.completed_date <= to_date,
+            db.or_(
+                User.last_working_day.is_(None),
+                KaironChartRecord.completed_date <= User.last_working_day,
+            ),
             KaironChartRecord.user_id.isnot(None),
             KaironChartRecord.user_id.in_(user_ids),
         )
@@ -412,9 +479,14 @@ def get_coding_dashboard(from_date, to_date, program=None, lead_id=None, cohort_
             func.sum(case((ManualDailyRecord.status == "pending", 1), else_=0)),
             func.count(ManualDailyRecord.id),
         )
+        .join(User, ManualDailyRecord.user_id == User.id)
         .filter(
             ManualDailyRecord.record_date >= from_date,
             ManualDailyRecord.record_date <= to_date,
+            db.or_(
+                User.last_working_day.is_(None),
+                ManualDailyRecord.record_date <= User.last_working_day,
+            ),
             ManualDailyRecord.user_id.in_(user_ids),
         )
         .group_by(ManualDailyRecord.user_id)
@@ -459,6 +531,9 @@ def get_coding_dashboard(from_date, to_date, program=None, lead_id=None, cohort_
             "first_name": user.first_name,
             "last_name": user.last_name,
             "email": user.email,
+            "is_active": user.is_active,
+            "last_working_day": user.last_working_day,
+            "lead_id": user.reports_to_id,
             "kairon": kairon_by_user.get(user.id, {"active": 0, "on_hold": 0, "completed": 0}),
             "manual": manual_by_user.get(
                 user.id,

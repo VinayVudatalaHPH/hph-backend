@@ -466,6 +466,62 @@ def test_get_coding_dashboard_aggregates_within_window_only():
     assert idle_card["manual"]["record_count"] == 0
 
 
+def test_get_coding_dashboard_includes_inactive_user_only_through_last_working_day():
+    user = _get_or_create_user(
+        "reports-dash-inactive@example.com",
+        "Historical",
+        "Coder",
+        "TEST-RPT-DASH-INACTIVE",
+    )
+    manager_id = _first_manager_id()
+    original_active = user.is_active
+    original_last_working_day = user.last_working_day
+
+    try:
+        user.is_active = False
+        user.last_working_day = dt.date(2026, 9, 15)
+        db.session.commit()
+
+        import_batch(
+            dt.date(2026, 9, 20),
+            [
+                _kairon_row(user, "Completed", completed_date=dt.date(2026, 9, 12)),
+                _kairon_row(user, "Completed", completed_date=dt.date(2026, 9, 18)),
+            ],
+            uploaded_by_id=manager_id,
+        )
+        upsert_own_record(
+            user.id,
+            _manual_entry(record_date=dt.date(2026, 9, 12), production_count=11),
+        )
+        upsert_own_record(
+            user.id,
+            _manual_entry(record_date=dt.date(2026, 9, 18), production_count=99),
+        )
+        db.session.commit()
+
+        september_cards = get_coding_dashboard(
+            dt.date(2026, 9, 1), dt.date(2026, 9, 30), include_daily=True
+        )
+        card = next(item for item in september_cards if item["user_id"] == user.id)
+        assert card["is_active"] is False
+        assert card["last_working_day"] == dt.date(2026, 9, 15)
+        assert card["kairon"]["completed"] == 1
+        assert card["manual"]["production_count"] == 11
+        assert card["efficiency"]["manual_charts"] == 11
+        assert card["efficiency"]["kairon_charts"] == 1
+        assert {row["date"] for row in card["efficiency"]["daily"]} == {
+            dt.date(2026, 9, 12)
+        }
+
+        october_cards = get_coding_dashboard(dt.date(2026, 10, 1), dt.date(2026, 10, 31))
+        assert user.id not in {item["user_id"] for item in october_cards}
+    finally:
+        user.is_active = original_active
+        user.last_working_day = original_last_working_day
+        db.session.commit()
+
+
 def test_get_coding_dashboard_filters_program_and_lead_team():
     lead = _get_or_create_user("reports-filter-lead@example.com", "Filter", "Lead", "TEST-RPT-FILTER-LEAD", "lead")
     team_user = _get_or_create_user("reports-filter-team@example.com", "Filter", "Team", "TEST-RPT-FILTER-TEAM")
@@ -875,6 +931,9 @@ def test_coding_dashboard_returns_expected_card_for_a_user(api_client, employee_
     assert status == 200, body
 
     card = next(row for row in body["data"] if row["userId"] == employee_user.id)
+    assert card["isActive"] is True
+    assert card["lastWorkingDay"] is None
+    assert card["leadId"] == employee_user.reports_to_id
     assert card["kairon"] == {"active": 0, "onHold": 0, "completed": 1}
     assert card["manual"]["productionCount"] == 10
     assert {row["date"] for row in card["efficiency"]["daily"]} == {"2026-09-05", "2026-09-16"}
