@@ -46,11 +46,11 @@ services:
       - key: EMAIL_VALIDATE_CONFIG
         value: "false"
       - key: FRONTEND_LOGIN_URL
-        value: https://hph-frontend-668900523842.asia-south1.run.app/login
+        value: https://hph.onrender.com/login
       - key: LOG_DECRYPTED_PAYLOADS
         value: "false"
       - key: CORS_ALLOWED_ORIGINS
-        value: https://hph-frontend-668900523842.asia-south1.run.app
+        value: https://hph.onrender.com
       - key: WEB_CONCURRENCY
         value: "2"
       - key: GUNICORN_THREADS
