@@ -3,19 +3,10 @@ Kairon exports (Program, Level, Status, Coding Analyst, Actions, Last
 Action, Created, Completed, TAT, Age, Practice) - modeled directly on a
 real `coding_ops_tasks` export.
 
-Patient name and MBI are deliberately never modelled here. Kairon's real
-export carries patient PHI in those two columns; this table exists to
-track coder/QA workflow, not patient identity, so those columns simply
-have no field to hold them - the upload schema (kairon/schemas.py) also
-actively rejects a payload that mentions them, rather than silently
-dropping the value if a client's export tool still includes it.
-
-Because a chart row therefore carries no unique patient/MBI identifier,
-there is no reliable way to de-duplicate an individual row against a
-prior upload. Each upload is instead one `KaironUploadBatch` snapshot "as
-of" a manager-selected date; re-uploading for the same as_of_date
-supersedes the prior batch's rows (kept, not deleted, for audit) rather
-than merging row-by-row - see services.import_batch().
+Patient name is deliberately never modelled. Cumulative imports accept MBI
+only long enough to calculate a keyed fingerprint; the raw value is never
+persisted. New imports merge against `chart_identity_hash`, while the legacy
+as-of-date batch fields remain temporarily for old audit rows and clients.
 """
 from app.extensions import db
 
@@ -33,22 +24,29 @@ def _sql_in_list(values):
 
 
 class KaironUploadBatch(db.Model):
-    """One bulk-upload event. `as_of_date` is the reporting date the
-    manager selects in the UI after uploading - distinct from any row's
-    own Created/Completed dates, and the key a same-date re-upload
-    supersedes on (see the module docstring).
-    """
+    """One legacy snapshot or resumable cumulative import event."""
 
     __tablename__ = "kairon_upload_batches"
 
     id = db.Column(db.Integer, primary_key=True)
-    as_of_date = db.Column(db.Date, nullable=False)
+    # Legacy snapshot date. New cumulative imports do not require it; it is
+    # retained temporarily so old audit rows and clients remain readable.
+    as_of_date = db.Column(db.Date, nullable=True)
     source_filename = db.Column(db.String(255), nullable=True)
     uploaded_by_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)
     uploaded_at = db.Column(db.DateTime(timezone=True), server_default=db.func.now(), nullable=False)
     row_count = db.Column(db.Integer, nullable=False, default=0)
     matched_count = db.Column(db.Integer, nullable=False, default=0)
     unmatched_count = db.Column(db.Integer, nullable=False, default=0)
+    status = db.Column(db.String(24), nullable=False, default="pending")
+    file_checksum = db.Column(db.String(64), nullable=True)
+    total_rows = db.Column(db.Integer, nullable=False, default=0)
+    processed_count = db.Column(db.Integer, nullable=False, default=0)
+    inserted_count = db.Column(db.Integer, nullable=False, default=0)
+    updated_count = db.Column(db.Integer, nullable=False, default=0)
+    unchanged_count = db.Column(db.Integer, nullable=False, default=0)
+    rejected_count = db.Column(db.Integer, nullable=False, default=0)
+    completed_at = db.Column(db.DateTime(timezone=True), nullable=True)
     # Set when a later batch for the same as_of_date replaces this one.
     # Rows stay in place for audit rather than being deleted.
     superseded_at = db.Column(db.DateTime(timezone=True), nullable=True)
@@ -74,6 +72,8 @@ class KaironChartRecord(db.Model):
 
     id = db.Column(db.Integer, primary_key=True)
     batch_id = db.Column(db.Integer, db.ForeignKey("kairon_upload_batches.id"), nullable=False)
+    chart_identity_hash = db.Column(db.String(64), nullable=True, unique=True)
+    mbi_fingerprint = db.Column(db.String(64), nullable=True, index=True)
 
     program = db.Column(db.String(64), nullable=False)
     level = db.Column(db.String(16), nullable=False)
@@ -98,6 +98,11 @@ class KaironChartRecord(db.Model):
     practice = db.Column(db.String(255), nullable=True)
 
     created_at = db.Column(db.DateTime(timezone=True), server_default=db.func.now(), nullable=False)
+    first_seen_at = db.Column(db.DateTime(timezone=True), server_default=db.func.now(), nullable=False)
+    last_seen_at = db.Column(db.DateTime(timezone=True), server_default=db.func.now(), nullable=False)
+    updated_at = db.Column(
+        db.DateTime(timezone=True), server_default=db.func.now(), onupdate=db.func.now(), nullable=False
+    )
 
     batch = db.relationship("KaironUploadBatch", backref="records")
     user = db.relationship("User", backref="kairon_chart_records")
@@ -135,3 +140,41 @@ class KaironChartAnalystAction(db.Model):
 
     def __repr__(self):
         return f"<KaironChartAnalystAction chart_record_id={self.chart_record_id} user_id={self.user_id}>"
+
+
+class KaironImportChunk(db.Model):
+    """Idempotency and audit record for one client upload chunk."""
+
+    __tablename__ = "kairon_import_chunks"
+    __table_args__ = (db.UniqueConstraint("batch_id", "chunk_number", name="uq_kairon_import_chunk"),)
+
+    id = db.Column(db.Integer, primary_key=True)
+    batch_id = db.Column(db.Integer, db.ForeignKey("kairon_upload_batches.id"), nullable=False)
+    chunk_number = db.Column(db.Integer, nullable=False)
+    checksum = db.Column(db.String(64), nullable=False)
+    row_count = db.Column(db.Integer, nullable=False, default=0)
+    inserted_count = db.Column(db.Integer, nullable=False, default=0)
+    updated_count = db.Column(db.Integer, nullable=False, default=0)
+    unchanged_count = db.Column(db.Integer, nullable=False, default=0)
+    rejected_count = db.Column(db.Integer, nullable=False, default=0)
+    unmatched_count = db.Column(db.Integer, nullable=False, default=0)
+    processed_at = db.Column(db.DateTime(timezone=True), server_default=db.func.now(), nullable=False)
+
+    batch = db.relationship("KaironUploadBatch", backref="chunks")
+
+
+class KaironChartHistory(db.Model):
+    """A compact audit trail for status and analyst changes across exports."""
+
+    __tablename__ = "kairon_chart_history"
+
+    id = db.Column(db.Integer, primary_key=True)
+    chart_record_id = db.Column(db.Integer, db.ForeignKey("kairon_chart_records.id"), nullable=False)
+    batch_id = db.Column(db.Integer, db.ForeignKey("kairon_upload_batches.id"), nullable=False)
+    previous_status = db.Column(db.String(32), nullable=True)
+    status = db.Column(db.String(32), nullable=False)
+    previous_user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)
+    changed_at = db.Column(db.DateTime(timezone=True), server_default=db.func.now(), nullable=False)
+
+    chart_record = db.relationship("KaironChartRecord", backref="history")

@@ -3,16 +3,26 @@ from flask import Response
 from flask.views import MethodView
 
 from app.auth import require_feature, require_role
+from app.extensions import db
 from app.kairon import bp
 from app.kairon.models import KaironChartRecord, KaironUploadBatch
 from app.kairon.schemas import (
     KaironChartQuerySchema,
     KaironChartRecordListEnvelopeSchema,
+    KaironImportChunkSchema,
+    KaironImportProgressEnvelopeSchema,
+    KaironImportStartSchema,
     KaironUploadBatchEnvelopeSchema,
     KaironUploadBatchListEnvelopeSchema,
     KaironUploadRequestSchema,
 )
-from app.kairon.services import build_upload_template_csv, import_batch
+from app.kairon.services import (
+    build_upload_template_csv,
+    complete_cumulative_import,
+    import_batch,
+    process_import_chunk,
+    start_cumulative_import,
+)
 
 # Kairon belongs to Reports. Reports read grants visibility; Reports write
 # plus the Manager role grants bulk-upload access.
@@ -51,6 +61,57 @@ class KaironUploads(MethodView):
             source_filename=data.get("source_filename"),
         )
         return {"status": 201, "message": "Kairon chart records uploaded successfully.", "data": batch}
+
+
+@bp.route("/kairon/imports")
+class KaironImports(MethodView):
+    @require_feature(REPORTS_FEATURE, access="write")
+    @require_role("manager")
+    @bp.arguments(KaironImportStartSchema)
+    @bp.response(201, KaironImportProgressEnvelopeSchema)
+    def post(self, data):
+        batch = start_cumulative_import(
+            source_filename=data["source_filename"],
+            file_checksum=data["file_checksum"],
+            total_rows=data["total_rows"],
+            uploaded_by_id=g.user.id,
+        )
+        return {"status": 201, "message": "Kairon import started.", "data": batch}
+
+
+@bp.route("/kairon/imports/<int:batch_id>")
+class KaironImportProgress(MethodView):
+    @require_feature(REPORTS_FEATURE)
+    @bp.response(200, KaironImportProgressEnvelopeSchema)
+    def get(self, batch_id):
+        batch = db.get_or_404(KaironUploadBatch, batch_id)
+        return {"status": 200, "message": "Kairon import progress retrieved.", "data": batch}
+
+
+@bp.route("/kairon/imports/<int:batch_id>/chunks/<int:chunk_number>")
+class KaironImportChunks(MethodView):
+    @require_feature(REPORTS_FEATURE, access="write")
+    @require_role("manager")
+    @bp.arguments(KaironImportChunkSchema)
+    @bp.response(200, KaironImportProgressEnvelopeSchema)
+    def post(self, data, batch_id, chunk_number):
+        batch, _chunk = process_import_chunk(
+            batch_id=batch_id,
+            chunk_number=chunk_number,
+            checksum=data["checksum"],
+            rows=data["rows"],
+        )
+        return {"status": 200, "message": f"Chunk {chunk_number} uploaded.", "data": batch}
+
+
+@bp.route("/kairon/imports/<int:batch_id>/complete")
+class KaironImportComplete(MethodView):
+    @require_feature(REPORTS_FEATURE, access="write")
+    @require_role("manager")
+    @bp.response(200, KaironImportProgressEnvelopeSchema)
+    def post(self, batch_id):
+        batch = complete_cumulative_import(batch_id)
+        return {"status": 200, "message": "Kairon import completed.", "data": batch}
 
 
 @bp.route("/kairon/charts")

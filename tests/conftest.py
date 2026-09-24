@@ -47,7 +47,9 @@ _COHORT_MODULE_TABLES_FK_ORDER = (
     # app/kairon's own tables - reference kairon_chart_records/
     # kairon_upload_batches (and users, which is never cleaned here), not
     # coders, so only their order relative to each other matters.
+    "kairon_chart_history",
     "kairon_chart_analyst_actions",
+    "kairon_import_chunks",
     "kairon_chart_records",
     "kairon_upload_batches",
     # app/manual_daily_records' own table - references users (never
@@ -203,8 +205,18 @@ class ApiClient:
         response = self.client.get(path)
         return response.status_code, self._decrypt(response)
 
-    def delete(self, path):
-        response = self.client.delete(path)
+    def delete(self, path, body=None):
+        if body is None:
+            response = self.client.delete(path)
+        else:
+            version, key = get_active_key()
+            encrypted = encrypt_payload(json.dumps(body).encode(), key)
+            response = self.client.delete(
+                path,
+                data=encrypted,
+                content_type="application/json",
+                headers={"X-Encryption-Key-Version": str(version)},
+            )
         return response.status_code, self._decrypt(response)
 
     def _write(self, method, path, body):

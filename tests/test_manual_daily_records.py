@@ -1,9 +1,17 @@
+import base64
 import datetime as dt
+from io import BytesIO
+
+from openpyxl import Workbook, load_workbook
 
 from app.encryption.passwords import hash_password
 from app.extensions import db
 from app.manual_daily_records.models import ManualDailyRecord
-from app.manual_daily_records.services import upsert_own_record
+from app.manual_daily_records.services import (
+    MANUAL_MTD_UPLOAD_HEADERS,
+    MANUAL_UPLOAD_HEADERS,
+    upsert_own_record,
+)
 from app.roles.models import Role, RoleType
 from app.users.models import User
 
@@ -52,6 +60,63 @@ def _entry_body(**overrides):
     }
     body.update(overrides)
     return body
+
+
+def _bulk_workbook(rows):
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "09182026"
+    sheet.append(MANUAL_UPLOAD_HEADERS)
+    for row in rows:
+        sheet.append(row)
+    output = BytesIO()
+    workbook.save(output)
+    return base64.b64encode(output.getvalue()).decode("ascii")
+
+
+def _manager_team_member(manager, suffix="one"):
+    project = manager.project
+    lead_type = RoleType.query.filter_by(code="lead").one()
+    employee_type = RoleType.query.filter_by(code="employee").one()
+    lead_role = Role.query.filter_by(role_type_id=lead_type.id).first()
+    employee_role = Role.query.filter_by(role_type_id=employee_type.id).first()
+    lead = User.query.filter_by(email=f"mdr-bulk-lead-{suffix}@example.com").first()
+    if lead is None:
+        lead = User(
+            email=f"mdr-bulk-lead-{suffix}@example.com",
+            first_name="Bulk",
+            last_name=f"Lead {suffix}",
+            emp_id=f"TEST-MDR-BULK-LEAD-{suffix}",
+            role_id=lead_role.id,
+            project_id=project.id,
+            reports_to_id=manager.id,
+            password_hash=hash_password("test-password"),
+            first_login=False,
+            is_active=True,
+        )
+        db.session.add(lead)
+        db.session.flush()
+    employee = User.query.filter_by(email=f"mdr-bulk-{suffix}@example.com").first()
+    if employee is None:
+        employee = User(
+            email=f"mdr-bulk-{suffix}@example.com",
+            first_name="Bulk",
+            last_name=f"Employee {suffix}",
+            emp_id=f"TEST-MDR-BULK-{suffix}",
+            role_id=employee_role.id,
+            project_id=project.id,
+            reports_to_id=lead.id,
+            password_hash=hash_password("test-password"),
+            first_login=False,
+            is_active=True,
+        )
+        db.session.add(employee)
+    else:
+        employee.project_id = project.id
+        employee.reports_to_id = lead.id
+        employee.is_active = True
+    db.session.commit()
+    return employee
 
 
 # --------------------------------------------------------------------------
@@ -209,3 +274,149 @@ def test_query_filters_by_user_ids_and_excludes(api_client, manager_user):
     )
     assert status == 200, body
     assert {row["userId"] for row in body["data"]} == {user_a.id}
+
+
+def test_manager_downloads_manual_bulk_template(api_client, manager_user):
+    api_client.login(manager_user.email, "test-password")
+
+    response = api_client.client.get("/api/manual-daily-records/upload-template")
+
+    assert response.status_code == 200
+    assert response.mimetype == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    workbook = load_workbook(BytesIO(response.data), read_only=True, data_only=True)
+    assert tuple(cell.value for cell in workbook.active[1]) == MANUAL_MTD_UPLOAD_HEADERS
+
+
+def _import_row(employee, date="2026-09-18", production=18):
+    return {
+        "userId": employee.id,
+        "date": date,
+        "productionCount": production,
+        "techIssuesDowntimeHours": 0.5,
+        "noInventoryIdleTimeHours": 0,
+        "leaveHours": 0,
+        "meetingEngagementHours": 0.75,
+    }
+
+
+def _start_manual_import(api_client, rows, suffix="one"):
+    status, body = api_client.post(
+        "/api/manual-daily-records/imports",
+        {
+            "sourceFilename": f"manual-{suffix}.xlsx",
+            "fileChecksum": suffix[0] * 64,
+            "totalRows": len(rows),
+        },
+    )
+    assert status == 201, body
+    return body["data"]["id"]
+
+
+def test_chunked_manual_import_is_idempotent_and_preserves_identical_approval(api_client, manager_user):
+    employee = _manager_team_member(manager_user, "chunked")
+    rows = [_import_row(employee, "2026-09-17", 17), _import_row(employee, "2026-09-18", 18)]
+    api_client.login(manager_user.email, "test-password")
+
+    import_id = _start_manual_import(api_client, rows, "a")
+    status, body = api_client.post(
+        f"/api/manual-daily-records/imports/{import_id}/chunks/0",
+        {"checksum": "b" * 64, "rows": rows},
+    )
+    assert status == 200, body
+    assert body["data"]["createdCount"] == 2
+    status, body = api_client.post(f"/api/manual-daily-records/imports/{import_id}/complete")
+    assert status == 200, body
+
+    record = ManualDailyRecord.query.filter_by(
+        user_id=employee.id, record_date=dt.date(2026, 9, 18)
+    ).one()
+    record.status = "approved"
+    db.session.commit()
+
+    repeated_id = _start_manual_import(api_client, rows, "c")
+    status, body = api_client.post(
+        f"/api/manual-daily-records/imports/{repeated_id}/chunks/0",
+        {"checksum": "d" * 64, "rows": rows},
+    )
+    assert status == 200, body
+    assert body["data"]["unchangedCount"] == 2
+    assert body["data"]["updatedCount"] == 0
+    assert ManualDailyRecord.query.filter_by(user_id=employee.id).count() == 2
+    assert db.session.get(ManualDailyRecord, record.id).status == "approved"
+
+
+def test_chunked_manual_import_updates_only_changed_user_day(api_client, manager_user):
+    employee = _manager_team_member(manager_user, "changed")
+    upsert_own_record(
+        employee.id,
+        _entry(record_date=dt.date(2026, 9, 18), production_count=18),
+    )
+    api_client.login(manager_user.email, "test-password")
+    rows = [_import_row(employee, production=27)]
+    import_id = _start_manual_import(api_client, rows, "e")
+
+    status, body = api_client.post(
+        f"/api/manual-daily-records/imports/{import_id}/chunks/0",
+        {"checksum": "f" * 64, "rows": rows},
+    )
+
+    assert status == 200, body
+    assert body["data"]["updatedCount"] == 1
+    record = ManualDailyRecord.query.filter_by(
+        user_id=employee.id, record_date=dt.date(2026, 9, 18)
+    ).one()
+    assert record.production_count == 27
+    assert record.status == "pending"
+
+
+def test_manager_bulk_upload_creates_and_updates_team_records(api_client, manager_user):
+    employee = _manager_team_member(manager_user, "success")
+    payload = _bulk_workbook(
+        [[employee.email, f"{employee.first_name} {employee.last_name}", 18, 0.5, 0, 0, 0.75, 0]]
+    )
+    api_client.login(manager_user.email, "test-password")
+
+    status, body = api_client.post(
+        "/api/manual-daily-records/bulk-upload",
+        {"recordDate": "2026-09-18", "sourceFilename": "production.xlsx", "fileBase64": payload},
+    )
+
+    assert status == 201, body
+    assert body["data"]["createdCount"] == 1
+    assert body["data"]["importedCount"] == 1
+    record = ManualDailyRecord.query.filter_by(user_id=employee.id, record_date=dt.date(2026, 9, 18)).one()
+    assert record.production_count == 18
+    assert record.pvp_count == 18
+    assert record.foundation_count == 0
+
+    updated_payload = _bulk_workbook(
+        [[employee.email.upper(), f"{employee.first_name} {employee.last_name}", 22, 0, 1, 0, 0.25, 0]]
+    )
+    status, body = api_client.post(
+        "/api/manual-daily-records/bulk-upload",
+        {"recordDate": "2026-09-18", "sourceFilename": "production.xlsx", "fileBase64": updated_payload},
+    )
+    assert status == 201, body
+    assert body["data"]["updatedCount"] == 1
+    assert ManualDailyRecord.query.filter_by(user_id=employee.id, record_date=dt.date(2026, 9, 18)).count() == 1
+    assert ManualDailyRecord.query.filter_by(user_id=employee.id, record_date=dt.date(2026, 9, 18)).one().production_count == 22
+
+
+def test_bulk_upload_reports_row_errors_and_imports_nothing(api_client, manager_user):
+    employee = _manager_team_member(manager_user, "invalid")
+    payload = _bulk_workbook(
+        [
+            [employee.email, "Wrong Person", 18, 0, 0, 0, 0.75, 0],
+            ["outside@example.com", "Outside Person", 10, 0, 0, 0, 0, 0],
+        ]
+    )
+    api_client.login(manager_user.email, "test-password")
+
+    status, body = api_client.post(
+        "/api/manual-daily-records/bulk-upload",
+        {"recordDate": "2026-09-18", "sourceFilename": "invalid.xlsx", "fileBase64": payload},
+    )
+
+    assert status == 422, body
+    assert len(body["data"]["rowErrors"]) == 2
+    assert ManualDailyRecord.query.filter_by(record_date=dt.date(2026, 9, 18)).count() == 0

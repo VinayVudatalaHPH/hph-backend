@@ -45,6 +45,10 @@ class Config:
         "max_overflow": 2,
     }
     SECRET_KEY = os.environ["SECRET_KEY"]
+    # Stable keyed hash used to identify Kairon charts without retaining raw
+    # MBI. Set a dedicated secret in deployed environments before importing;
+    # the SECRET_KEY fallback keeps existing local setups working.
+    KAIRON_IDENTITY_KEY = os.environ.get("KAIRON_IDENTITY_KEY", SECRET_KEY)
     # Session cookies must be Secure (HTTPS-only) per the doc's "TLS everywhere"
     # requirement. Defaults to True; only disable for local HTTP-only dev.
     SESSION_COOKIE_SECURE = _env_bool("SESSION_COOKIE_SECURE", True)

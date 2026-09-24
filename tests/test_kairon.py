@@ -3,7 +3,15 @@ import datetime as dt
 from app.encryption.passwords import hash_password
 from app.extensions import db
 from app.kairon.models import KaironChartRecord, KaironUploadBatch
-from app.kairon.services import build_upload_template_csv, import_batch, normalize_analyst_name, resolve_user
+from app.kairon.services import (
+    build_upload_template_csv,
+    complete_cumulative_import,
+    import_batch,
+    normalize_analyst_name,
+    process_import_chunk,
+    resolve_user,
+    start_cumulative_import,
+)
 from app.roles.models import Role, RoleType
 from app.users.models import User
 
@@ -86,16 +94,56 @@ def test_resolve_user_returns_none_when_nothing_matches():
     assert resolve_user("Nobody Real - HPH Coding Analyst") is None
 
 
-def test_upload_template_never_offers_patient_or_mbi():
+def test_upload_template_offers_mbi_but_never_patient():
     csv_text = build_upload_template_csv()
     header = csv_text.strip().splitlines()[0]
     columns = header.split(",")
     assert columns == [
-        "Program", "Level", "Status", "Coding Analyst", "Actions",
+        "MBI", "Program", "Level", "Status", "Coding Analyst", "Actions",
         "Last Action", "Created", "Completed", "TAT", "Age", "Practice",
     ]
     assert "patient" not in header.lower()
-    assert "mbi" not in header.lower()
+    assert "MBI" in columns
+
+
+def test_cumulative_import_is_idempotent_and_updates_status():
+    known = _get_or_create_user("charishma.sonani@example.com", "Charishma", "Sonani", "TEST-CHARISHMA")
+    row = {
+        "mbi": "4VD5-P17-QX99",
+        "program": "PVP",
+        "level": "1LR",
+        "status": "Active",
+        "coding_analyst": "Charishma Sonani - HPH Coding Analyst",
+        "actions": 1,
+        "last_action": "Assigned",
+        "created_date": dt.date(2026, 9, 1),
+        "completed_date": None,
+        "tat_days": None,
+        "age_days": 1,
+        "practice": "Some Practice",
+    }
+
+    first = start_cumulative_import("first.csv", "a" * 64, 1, _first_superadmin_id())
+    first, _ = process_import_chunk(first.id, 0, "b" * 64, [row])
+    complete_cumulative_import(first.id)
+    assert first.inserted_count == 1
+    assert KaironChartRecord.query.count() == 1
+
+    second = start_cumulative_import("same-again.csv", "c" * 64, 1, _first_superadmin_id())
+    second, _ = process_import_chunk(second.id, 0, "d" * 64, [row])
+    complete_cumulative_import(second.id)
+    assert second.unchanged_count == 1
+    assert KaironChartRecord.query.count() == 1
+
+    row["status"] = "Completed"
+    row["completed_date"] = dt.date(2026, 9, 3)
+    third = start_cumulative_import("changed.csv", "e" * 64, 1, _first_superadmin_id())
+    third, _ = process_import_chunk(third.id, 0, "f" * 64, [row])
+    complete_cumulative_import(third.id)
+    assert third.updated_count == 1
+    record = KaironChartRecord.query.one()
+    assert record.status == "Completed"
+    assert record.user_id == known.id
 
 
 def test_import_batch_matches_known_user_and_skips_unmatched():
@@ -223,3 +271,27 @@ def test_manager_can_upload_and_list_charts(api_client, manager_user):
     assert len(body["data"]) == 1
     assert body["data"][0]["codingAnalyst"] == "Charishma Sonani - HPH Coding Analyst"
     assert all("patient" not in str(row).lower() for row in body["data"])
+
+
+def test_manager_can_upload_cumulative_chunks(api_client, manager_user):
+    _login_manager(api_client, manager_user)
+    _get_or_create_user("charishma.sonani@example.com", "Charishma", "Sonani", "TEST-CHARISHMA")
+
+    status, body = api_client.post(
+        "/api/kairon/imports",
+        {"sourceFilename": "mtd.csv", "fileChecksum": "a" * 64, "totalRows": 1},
+    )
+    assert status == 201, body
+    import_id = body["data"]["id"]
+
+    status, body = api_client.post(
+        f"/api/kairon/imports/{import_id}/chunks/0",
+        {"checksum": "b" * 64, "rows": [_sample_row(mbi="4VD5P17QX99")]},
+    )
+    assert status == 200, body
+    assert body["data"]["processedCount"] == 1
+    assert body["data"]["insertedCount"] == 1
+
+    status, body = api_client.post(f"/api/kairon/imports/{import_id}/complete", None)
+    assert status == 200, body
+    assert body["data"]["status"] == "completed"

@@ -91,9 +91,79 @@ class RejectManualDailyRecordSchema(Schema):
     reason = fields.String(required=False, load_default=None, allow_none=True)
 
 
+class ManualBulkUploadRequestSchema(Schema):
+    record_date = fields.Date(required=True, data_key="recordDate")
+    source_filename = fields.String(
+        required=True,
+        validate=validate.Length(min=1, max=255),
+        data_key="sourceFilename",
+    )
+    file_base64 = fields.String(
+        required=True,
+        validate=validate.Length(min=1, max=15_000_000),
+        data_key="fileBase64",
+    )
+
+
+class ManualBulkUploadResultSchema(Schema):
+    record_date = fields.Date(dump_only=True, data_key="recordDate")
+    source_filename = fields.String(dump_only=True, data_key="sourceFilename")
+    sheet_name = fields.String(dump_only=True, data_key="sheetName")
+    row_count = fields.Integer(dump_only=True, data_key="rowCount")
+    imported_count = fields.Integer(dump_only=True, data_key="importedCount")
+    created_count = fields.Integer(dump_only=True, data_key="createdCount")
+    updated_count = fields.Integer(dump_only=True, data_key="updatedCount")
+
+
+class ManualImportRowSchema(Schema):
+    user_id = fields.Integer(required=True, data_key="userId")
+    record_date = fields.Date(required=True, data_key="date")
+    production_count = fields.Integer(required=True, validate=validate.Range(min=0), data_key="productionCount")
+    tech_issues_downtime_hours = _hour_field(required=True, data_key="techIssuesDowntimeHours")
+    no_inventory_idle_time_hours = _hour_field(required=True, data_key="noInventoryIdleTimeHours")
+    leave_hours = _hour_field(required=True, data_key="leaveHours")
+    meeting_engagement_hours = _hour_field(required=True, data_key="meetingEngagementHours")
+
+
+class ManualImportStartSchema(Schema):
+    source_filename = fields.String(
+        required=True, data_key="sourceFilename", validate=validate.Length(min=1, max=255)
+    )
+    file_checksum = fields.String(
+        required=True, data_key="fileChecksum", validate=validate.Regexp(r"^[a-fA-F0-9]{64}$")
+    )
+    total_rows = fields.Integer(required=True, data_key="totalRows", validate=validate.Range(min=1))
+
+
+class ManualImportChunkSchema(Schema):
+    checksum = fields.String(required=True, validate=validate.Regexp(r"^[a-fA-F0-9]{64}$"))
+    rows = fields.List(
+        fields.Nested(ManualImportRowSchema), required=True, validate=validate.Length(min=1, max=2000)
+    )
+
+
+class ManualImportProgressSchema(Schema):
+    id = fields.Integer(dump_only=True)
+    status = fields.String(dump_only=True)
+    source_filename = fields.String(dump_only=True, data_key="sourceFilename")
+    total_rows = fields.Integer(dump_only=True, data_key="totalRows")
+    processed_count = fields.Integer(dump_only=True, data_key="processedCount")
+    created_count = fields.Integer(dump_only=True, data_key="createdCount")
+    updated_count = fields.Integer(dump_only=True, data_key="updatedCount")
+    unchanged_count = fields.Integer(dump_only=True, data_key="unchangedCount")
+    uploaded_at = fields.DateTime(dump_only=True, data_key="uploadedAt")
+    completed_at = fields.DateTime(dump_only=True, allow_none=True, data_key="completedAt")
+
+
 ManualDailyRecordEnvelopeSchema = envelope_schema(
     "ManualDailyRecordEnvelopeSchema", fields.Nested(ManualDailyRecordSchema)
 )
 ManualDailyRecordListEnvelopeSchema = envelope_schema(
     "ManualDailyRecordListEnvelopeSchema", fields.List(fields.Nested(ManualDailyRecordSchema))
+)
+ManualBulkUploadEnvelopeSchema = envelope_schema(
+    "ManualBulkUploadEnvelopeSchema", fields.Nested(ManualBulkUploadResultSchema)
+)
+ManualImportProgressEnvelopeSchema = envelope_schema(
+    "ManualImportProgressEnvelopeSchema", fields.Nested(ManualImportProgressSchema)
 )

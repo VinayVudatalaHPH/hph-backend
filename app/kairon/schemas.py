@@ -4,20 +4,12 @@ from marshmallow import RAISE, Schema, fields, pre_load, validate
 from app.kairon.models import VALID_KAIRON_LEVELS, VALID_KAIRON_STATUSES
 from app.responses import envelope_schema
 
-# The two columns Kairon's real export carries patient PHI in, and the
-# spelling variants worth guarding against (case/whitespace/punctuation
-# stripped before comparing). No schema below ever defines a field for
-# either one - this is the second of three layers that keep them out of
-# this system (see kairon/models.py's and kairon/services.py's module
-# docstrings for the other two): even if a client's upload tool still
-# includes a "Patient" or "MBI" key from the raw export, the whole batch
-# is refused with a clear reason instead of the key being silently dropped.
+# Patient names are not needed for record identity and must never be sent or
+# stored. MBI is accepted only by the import endpoint, where it is converted
+# to a keyed fingerprint and immediately discarded.
 _FORBIDDEN_COLUMN_ALIASES = {
     "patient",
     "patientname",
-    "mbi",
-    "mbinumber",
-    "medicarebeneficiaryidentifier",
 }
 
 
@@ -37,7 +29,7 @@ def reject_forbidden_columns(raw_row):
         abort(
             400,
             message=(
-                "Patient name and MBI must never be uploaded to this system. "
+                "Patient name must never be uploaded to this system. "
                 f"Remove these column(s) from the file before uploading: {', '.join(sorted(hits))}."
             ),
         )
@@ -73,6 +65,43 @@ class KaironChartRowSchema(Schema):
     @pre_load
     def _guard_phi_columns(self, data, **kwargs):
         return reject_forbidden_columns(data)
+
+
+class KaironImportRowSchema(KaironChartRowSchema):
+    """Cumulative import row. Raw MBI is request-only and is never persisted."""
+
+    mbi = fields.String(required=True, load_only=True, validate=validate.Length(min=1, max=64))
+
+
+class KaironImportStartSchema(Schema):
+    source_filename = fields.String(required=True, data_key="sourceFilename", validate=validate.Length(min=1, max=255))
+    file_checksum = fields.String(required=True, data_key="fileChecksum", validate=validate.Regexp(r"^[a-fA-F0-9]{64}$"))
+    total_rows = fields.Integer(required=True, data_key="totalRows", validate=validate.Range(min=1))
+
+
+class KaironImportChunkSchema(Schema):
+    checksum = fields.String(required=True, validate=validate.Regexp(r"^[a-fA-F0-9]{64}$"))
+    rows = fields.List(fields.Nested(KaironImportRowSchema), required=True, validate=validate.Length(min=1, max=2000))
+
+
+class KaironImportProgressSchema(Schema):
+    id = fields.Integer(dump_only=True)
+    status = fields.String(dump_only=True)
+    source_filename = fields.String(dump_only=True, allow_none=True, data_key="sourceFilename")
+    total_rows = fields.Integer(dump_only=True, data_key="totalRows")
+    processed_count = fields.Integer(dump_only=True, data_key="processedCount")
+    inserted_count = fields.Integer(dump_only=True, data_key="insertedCount")
+    updated_count = fields.Integer(dump_only=True, data_key="updatedCount")
+    unchanged_count = fields.Integer(dump_only=True, data_key="unchangedCount")
+    rejected_count = fields.Integer(dump_only=True, data_key="rejectedCount")
+    unmatched_count = fields.Integer(dump_only=True, data_key="unmatchedCount")
+    uploaded_at = fields.DateTime(dump_only=True, data_key="uploadedAt")
+    completed_at = fields.DateTime(dump_only=True, allow_none=True, data_key="completedAt")
+
+
+KaironImportProgressEnvelopeSchema = envelope_schema(
+    "KaironImportProgressEnvelopeSchema", fields.Nested(KaironImportProgressSchema)
+)
 
 
 class KaironUploadRequestSchema(Schema):
@@ -123,7 +152,7 @@ class KaironChartQuerySchema(Schema):
 
 class KaironUploadBatchSchema(Schema):
     id = fields.Integer(dump_only=True)
-    as_of_date = fields.Date(dump_only=True, data_key="asOfDate")
+    as_of_date = fields.Date(dump_only=True, allow_none=True, data_key="asOfDate")
     source_filename = fields.String(dump_only=True, allow_none=True, data_key="sourceFilename")
     uploaded_by_id = fields.Integer(dump_only=True, data_key="uploadedById")
     uploaded_at = fields.DateTime(dump_only=True, data_key="uploadedAt")

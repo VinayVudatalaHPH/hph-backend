@@ -1,7 +1,34 @@
+import datetime as dt
+
 from app.extensions import db
 from app.encryption.passwords import hash_password
 from app.roles.models import Role, RoleType
 from app.users.models import Project, User
+
+
+def test_deactivate_user_persists_and_returns_last_working_day(api_client, manager_user, employee_user):
+    employee_user.is_active = True
+    employee_user.last_working_day = None
+    db.session.commit()
+    api_client.login(manager_user.email, "test-password")
+
+    status, body = api_client.delete(
+        f"/api/users/{employee_user.id}", {"last_working_day": "2026-09-15"}
+    )
+
+    assert status == 200, body
+    db.session.refresh(employee_user)
+    assert employee_user.is_active is False
+    assert employee_user.last_working_day == dt.date(2026, 9, 15)
+
+    status, body = api_client.get("/api/users/inactive")
+    assert status == 200, body
+    serialized = next(row for row in body["data"] if row["id"] == employee_user.id)
+    assert serialized["last_working_day"] == "2026-09-15"
+
+    employee_user.is_active = True
+    employee_user.last_working_day = None
+    db.session.commit()
 
 
 def test_filter_users_by_role_id(api_client, manager_user, employee_user):

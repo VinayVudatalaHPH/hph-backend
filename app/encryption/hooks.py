@@ -1,4 +1,5 @@
 import io
+import json
 
 from cryptography.exceptions import InvalidTag
 from flask import current_app, request
@@ -8,6 +9,7 @@ from app.encryption.crypto import decrypt_payload, encrypt_payload
 from app.encryption.services import get_active_key, get_key_for_decryption
 
 KEY_VERSION_HEADER = "X-Encryption-Key-Version"
+_SENSITIVE_LOG_KEYS = {"password", "mbi", "mbinumber", "medicarebeneficiaryidentifier", "patient", "patientname"}
 
 # The one deliberate exception to "encrypt everything" (§4b): key exchange
 # can't encrypt the very key a client needs to decrypt everything else.
@@ -38,6 +40,24 @@ def _log_decrypted_payload(direction, key_version, plaintext_bytes, status_code=
     if not current_app.config["LOG_DECRYPTED_PAYLOADS"]:
         return
     status_part = f" status={status_code}" if status_code is not None else ""
+    rendered_body = plaintext_bytes.decode("utf-8", errors="replace")
+    try:
+        parsed = json.loads(rendered_body)
+
+        def redact(value):
+            if isinstance(value, dict):
+                return {
+                    key: "[REDACTED]" if "".join(ch for ch in key.lower() if ch.isalnum()) in _SENSITIVE_LOG_KEYS else redact(item)
+                    for key, item in value.items()
+                }
+            if isinstance(value, list):
+                return [redact(item) for item in value]
+            return value
+
+        rendered_body = json.dumps(redact(parsed), separators=(",", ":"))
+    except (TypeError, ValueError):
+        pass
+
     current_app.logger.info(
         "[decrypted %s] %s %s keyVersion=%s bytes=%d%s body=%s",
         direction,
@@ -46,7 +66,7 @@ def _log_decrypted_payload(direction, key_version, plaintext_bytes, status_code=
         key_version,
         len(plaintext_bytes),
         status_part,
-        plaintext_bytes.decode("utf-8", errors="replace"),
+        rendered_body,
     )
 
 

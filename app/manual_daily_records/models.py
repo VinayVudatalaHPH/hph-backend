@@ -1,6 +1,6 @@
 """Manual daily production/attendance records: one row per user per
-calendar day, entered by that user themselves (never uploaded in bulk,
-never entered on someone else's behalf - see the module's design doc).
+calendar day, entered by that user or imported for a manager's team from
+the controlled bulk-upload workbook.
 
 Unique per (user_id, record_date); the self-entry endpoint upserts on that
 pair rather than ever creating a second row for the same person's same
@@ -75,3 +75,45 @@ class ManualDailyRecord(db.Model):
 
     def __repr__(self):
         return f"<ManualDailyRecord user_id={self.user_id} date={self.record_date} status={self.status}>"
+
+
+class ManualImportBatch(db.Model):
+    """One resumable month-to-date or historical manual production import."""
+
+    __tablename__ = "manual_import_batches"
+
+    id = db.Column(db.Integer, primary_key=True)
+    source_filename = db.Column(db.String(255), nullable=False)
+    file_checksum = db.Column(db.String(64), nullable=False)
+    uploaded_by_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)
+    uploaded_at = db.Column(db.DateTime(timezone=True), server_default=db.func.now(), nullable=False)
+    status = db.Column(db.String(24), nullable=False, default="uploading")
+    total_rows = db.Column(db.Integer, nullable=False)
+    processed_count = db.Column(db.Integer, nullable=False, default=0)
+    created_count = db.Column(db.Integer, nullable=False, default=0)
+    updated_count = db.Column(db.Integer, nullable=False, default=0)
+    unchanged_count = db.Column(db.Integer, nullable=False, default=0)
+    completed_at = db.Column(db.DateTime(timezone=True), nullable=True)
+
+    uploaded_by = db.relationship("User")
+
+
+class ManualImportChunk(db.Model):
+    """Idempotency and audit record for one client-side upload chunk."""
+
+    __tablename__ = "manual_import_chunks"
+    __table_args__ = (
+        db.UniqueConstraint("batch_id", "chunk_number", name="uq_manual_import_chunk"),
+    )
+
+    id = db.Column(db.Integer, primary_key=True)
+    batch_id = db.Column(db.Integer, db.ForeignKey("manual_import_batches.id"), nullable=False)
+    chunk_number = db.Column(db.Integer, nullable=False)
+    checksum = db.Column(db.String(64), nullable=False)
+    row_count = db.Column(db.Integer, nullable=False)
+    created_count = db.Column(db.Integer, nullable=False, default=0)
+    updated_count = db.Column(db.Integer, nullable=False, default=0)
+    unchanged_count = db.Column(db.Integer, nullable=False, default=0)
+    processed_at = db.Column(db.DateTime(timezone=True), server_default=db.func.now(), nullable=False)
+
+    batch = db.relationship("ManualImportBatch", backref="chunks")

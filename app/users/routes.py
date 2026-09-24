@@ -20,6 +20,7 @@ from app.users import bp
 from app.users.hierarchy import can_manage_role_type
 from app.users.models import User
 from app.users.schemas import (
+    DeactivateUserSchema,
     SetPasswordSchema,
     ManagerTeamEnvelopeSchema,
     ManagerTeamQuerySchema,
@@ -335,14 +336,16 @@ class UserDetail(MethodView):
         return {"status": 200, "message": "User updated successfully.", "data": user}
 
     @require_feature("user_management")
+    @bp.arguments(DeactivateUserSchema)
     @bp.response(200, MessageEnvelopeSchema)
-    def delete(self, user_id):
+    def delete(self, data, user_id):
         user = User.query.get_or_404(user_id)
         _enforce_hierarchy("create/delete", user.role)
 
         # soft-delete, mirroring §1a's Feature "delete means deactivate" —
         # a hard delete would orphan sessions and other users' created_by_id
         user.is_active = False
+        user.last_working_day = data["last_working_day"]
         _revoke_active_sessions(user)
         db.session.commit()
         return {"status": 200, "message": "User deleted successfully.", "data": None}

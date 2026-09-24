@@ -1,4 +1,6 @@
-from marshmallow import Schema, ValidationError, fields, validate, validates_schema
+from datetime import date
+
+from marshmallow import Schema, ValidationError, fields, validate, validates, validates_schema
 
 from app.extensions import db
 from app.responses import envelope_schema
@@ -84,6 +86,7 @@ class UserSchema(Schema):
     reports_to_id = fields.Integer(dump_only=True, allow_none=True)
     first_login = fields.Boolean(dump_only=True)
     is_active = fields.Boolean(dump_only=True)
+    last_working_day = fields.Date(dump_only=True, allow_none=True)
     created_at = fields.DateTime(dump_only=True)
     updated_at = fields.DateTime(dump_only=True)
 
@@ -91,6 +94,15 @@ class UserSchema(Schema):
         # Same nested shape UserProfileSchema uses at login, so the frontend
         # never needs to call the features API to know what a role can do.
         return RoleProfileSchema().dump(user.role)
+
+
+class DeactivateUserSchema(Schema):
+    last_working_day = fields.Date(required=True)
+
+    @validates("last_working_day")
+    def validate_last_working_day(self, value, **kwargs):
+        if value > date.today():
+            raise ValidationError("Last working day cannot be in the future.")
 
 
 class UserFilterQuerySchema(Schema):
