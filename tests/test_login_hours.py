@@ -3,12 +3,15 @@ from datetime import date
 from io import BytesIO
 
 from openpyxl import Workbook
+import pytest
 
 from app.encryption.passwords import hash_password
 from app.cohorts.models import Cohort, CohortMembership
 from app.extensions import db
 from app.login_hours.models import LoginHourRecord
-from app.roles.models import Role, RoleType
+from app.login_hours.services import _readable_user_ids, list_login_hour_records
+from app.roles.models import Role, RoleType, role_features
+from app.features.models import Feature
 from app.users.models import Project, User
 
 
@@ -16,6 +19,36 @@ HEADERS = [
     "Date", "Personnel ID", "Employee", "Department", "First In", "Last Out",
     "Total Inside", "Total Outside", "Total Span", "Entries", "Exits", "Status", "Anomalies",
 ]
+
+
+@pytest.mark.parametrize("role_code", ["admin", "lead", "employee"])
+def test_upload_requires_explicit_write_permission(api_client, role_code):
+    admin = _coding_role_user(
+        "Attendance Writer", f"attendance-writer-{role_code}@example.com", f"TEST-LH-WRITER-{role_code}", role_code
+    )
+    feature = Feature.query.filter_by(codename="login_hours").one()
+    condition = (role_features.c.role_id == admin.role_id) & (role_features.c.feature_id == feature.id)
+    original = db.session.execute(db.select(role_features).where(condition)).mappings().first()
+    try:
+        db.session.execute(role_features.delete().where(condition))
+        db.session.execute(role_features.insert().values(role_id=admin.role_id, feature_id=feature.id, can_read=True, can_write=False))
+        db.session.commit()
+        api_client.login(admin.email, "test-password")
+        payload = _workbook_base64("03_All_Employees", 3, [
+            ["2026-09-15", 9999, "Unknown Person", "Coding", "09:00", "17:00", "8h 0m", "0h 0m", "8h 0m", 1, 1, "Complete", 0],
+        ])
+        request = {"sourceFilename": "attendance.xlsx", "fileBase64": payload}
+        status, body = api_client.post("/api/login-hours/uploads", request)
+        assert status == 403, body
+        db.session.execute(role_features.update().where(condition).values(can_write=True))
+        db.session.commit()
+        status, body = api_client.post("/api/login-hours/uploads", request)
+        assert status == 201, body
+    finally:
+        db.session.execute(role_features.delete().where(condition))
+        if original:
+            db.session.execute(role_features.insert().values(**dict(original)))
+        db.session.commit()
 
 
 def _coding_user(name, email, emp_id):
@@ -84,6 +117,29 @@ def _workbook_base64(sheet_name, header_row, rows):
     output = BytesIO()
     workbook.save(output)
     return base64.b64encode(output.getvalue()).decode("ascii")
+
+
+def test_admin_all_projects_and_manager_project_scope(manager_user):
+    admin = _coding_role_user("Projects Admin", "projects-admin@example.com", "TEST-LH-PROJECT-ADMIN", "admin")
+    colleague = _coding_role_user("Project Colleague", "project-colleague@example.com", "TEST-LH-COLLEAGUE", "employee")
+    outsider = _coding_role_user("Other Project", "other-project@example.com", "TEST-LH-OTHER", "employee")
+    project = Project.query.filter_by(name="ATTENDANCE-TEST").first()
+    if project is None:
+        project = Project(name="ATTENDANCE-TEST")
+        db.session.add(project)
+        db.session.flush()
+    original_project = outsider.project_id
+    try:
+        outsider.project_id = project.id
+        db.session.commit()
+        assert colleague.id in _readable_user_ids(manager_user)
+        assert outsider.id not in _readable_user_ids(manager_user)
+        assert outsider.id in _readable_user_ids(admin)
+        result = list_login_hour_records(admin, 1, 25, project_id=project.id)
+        assert project.id in {option["id"] for option in result["filter_options"]["projects"]}
+    finally:
+        outsider.project_id = original_project
+        db.session.commit()
 
 
 def test_manager_uploads_office_dashboard_and_unmatched_names_are_dropped(api_client, manager_user):
@@ -198,9 +254,19 @@ def test_lead_and_employee_record_access_is_limited_to_their_reporting_scope(api
     api_client.login(team_member.email, "test-password")
     status, body = api_client.get("/api/login-hours/records")
     assert status == 200, body
-    assert [item["userId"] for item in body["data"]["items"]] == [team_member.id]
+    assert {item["userId"] for item in body["data"]["items"]} == {lead.id, team_member.id}
+
+    status, body = api_client.get(f"/api/login-hours/records?userIds={lead.id}&userIds={team_member.id}&from=2026-09-17&to=2026-09-17")
+    assert status == 200, body
+    assert body["data"]["total"] == 2
+
+    status, body = api_client.get("/api/login-hours/records?from=2026-09-18&to=2026-09-17")
+    assert status == 400, body
 
     status, body = api_client.get(f"/api/login-hours/records?userId={lead.id}")
+    assert status == 200, body
+
+    status, body = api_client.get(f"/api/login-hours/records?userIds={lead.id}&userIds={outside_member.id}")
     assert status == 403, body
 
     status, body = api_client.post(

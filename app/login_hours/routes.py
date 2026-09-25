@@ -1,7 +1,7 @@
 from flask import g
 from flask.views import MethodView
 
-from app.auth import require_feature, require_role
+from app.auth import require_feature
 from app.login_hours import bp
 from app.login_hours.models import LoginHoursUploadBatch
 from app.login_hours.schemas import (
@@ -17,14 +17,15 @@ from app.login_hours.services import import_login_hours, list_login_hour_records
 @bp.route("/login-hours/uploads")
 class LoginHoursUploads(MethodView):
     @require_feature("login_hours")
-    @require_role("manager")
     @bp.response(200, LoginHoursUploadBatchListEnvelopeSchema)
     def get(self):
-        batches = LoginHoursUploadBatch.query.order_by(LoginHoursUploadBatch.uploaded_at.desc()).all()
+        query = LoginHoursUploadBatch.query
+        if g.user.role.role_type.code not in {"admin", "super_admin"}:
+            query = query.filter_by(uploaded_by_id=g.user.id)
+        batches = query.order_by(LoginHoursUploadBatch.uploaded_at.desc()).all()
         return {"status": 200, "message": "Login-hours uploads retrieved successfully.", "data": batches}
 
     @require_feature("login_hours", access="write")
-    @require_role("manager")
     @bp.arguments(LoginHoursUploadRequestSchema)
     @bp.response(201, LoginHoursUploadBatchEnvelopeSchema)
     def post(self, data):
@@ -47,5 +48,7 @@ class LoginHoursRecords(MethodView):
             user_id=args.get("user_id"),
             lead_id=args.get("lead_id"),
             cohort_id=args.get("cohort_id"),
+            user_ids=args.get("user_ids"),
+            project_id=args.get("project_id"),
         )
         return {"status": 200, "message": "Login-hour records retrieved successfully.", "data": page}

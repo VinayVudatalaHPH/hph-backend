@@ -12,7 +12,6 @@ from app.cohorts.models import Cohort, CohortMembership
 from app.login_hours.models import LoginHourRecord, LoginHoursUploadBatch
 from app.roles.models import Role, RoleType
 from app.users.models import Project, User
-from app.users.hierarchy import manager_team_user_ids
 
 
 REQUIRED_HEADERS = {
@@ -223,21 +222,27 @@ def import_login_hours(file_base64, source_filename, uploaded_by_id):
 
 def _readable_user_ids(actor):
     role_type = actor.role.role_type.code
+    if role_type in {"admin", "super_admin"}:
+        return [row.id for row in User.query.all()]
     if role_type == "manager":
-        return manager_team_user_ids(actor.id)
+        return [row.id for row in User.query.filter(User.project_id == actor.project_id).all()] if actor.project_id else [actor.id]
     if role_type == "lead":
         direct_report_ids = [
             user.id
             for user in User.query.join(Role).join(RoleType).filter(
                 User.reports_to_id == actor.id,
-                User.is_active.is_(True),
                 User.project_id == actor.project_id,
                 RoleType.code == "employee",
             )
         ]
         return [actor.id, *direct_report_ids]
     if role_type == "employee":
-        return [actor.id]
+        if actor.reports_to_id is None or actor.project_id is None:
+            return [actor.id]
+        return [row.id for row in User.query.filter(
+            User.project_id == actor.project_id,
+            db.or_(User.id == actor.id, User.id == actor.reports_to_id, User.reports_to_id == actor.reports_to_id),
+        ).all()]
     return []
 
 
@@ -245,7 +250,7 @@ def _login_hour_filter_options(readable_ids):
     readable_users = (
         User.query.join(Role)
         .join(RoleType)
-        .filter(User.id.in_(readable_ids), User.is_active.is_(True))
+        .filter(User.id.in_(readable_ids))
         .order_by(User.first_name, User.last_name)
         .all()
     )
@@ -258,7 +263,8 @@ def _login_hour_filter_options(readable_ids):
         .all()
     )
     return {
-        "users": [{"id": user.id, "label": f"{user.first_name} {user.last_name}"} for user in readable_users],
+        "users": [{"id": user.id, "label": f"{user.first_name} {user.last_name}", "projectId": user.project_id} for user in readable_users],
+        "projects": [{"id": project.id, "label": project.name} for project in Project.query.filter(Project.id.in_({user.project_id for user in readable_users if user.project_id})).order_by(Project.name).all()],
         "leads": [{"id": lead.id, "label": f"{lead.first_name} {lead.last_name}"} for lead in leads],
         "cohorts": [{"id": cohort.id, "label": cohort.label} for cohort in cohorts],
     }
@@ -273,13 +279,25 @@ def list_login_hour_records(
     user_id=None,
     lead_id=None,
     cohort_id=None,
+    user_ids=None,
+    project_id=None,
 ):
+    if from_date and to_date and from_date > to_date:
+        abort(400, message="From date must be on or before To date.")
     readable_ids = _readable_user_ids(actor)
     filter_options = _login_hour_filter_options(readable_ids)
+    if user_ids and not set(user_ids).issubset(readable_ids):
+        abort(403, message="You cannot view login hours for one or more selected users.")
     if user_id is not None and user_id not in readable_ids:
         abort(403, message="You cannot view login hours for that user.")
 
     filtered_user_ids = set(readable_ids)
+    if project_id is not None:
+        if project_id not in {option["id"] for option in filter_options["projects"]}:
+            abort(403, message="You cannot view login hours for that project.")
+        filtered_user_ids &= {row.id for row in User.query.filter(User.project_id == project_id).all()}
+    if user_ids:
+        filtered_user_ids &= set(user_ids)
     if lead_id is not None:
         allowed_lead_ids = {option["id"] for option in filter_options["leads"]}
         if lead_id not in allowed_lead_ids:

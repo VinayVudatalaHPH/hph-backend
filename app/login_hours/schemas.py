@@ -26,11 +26,18 @@ class LoginHourRecordQuerySchema(Schema):
     from_date = fields.Date(load_default=None, allow_none=True, data_key="from")
     to_date = fields.Date(load_default=None, allow_none=True, data_key="to")
     user_id = fields.Integer(load_default=None, allow_none=True, data_key="userId")
+    user_ids = fields.List(fields.Integer(validate=validate.Range(min=1)), load_default=list, data_key="userIds")
+    project_id = fields.Integer(load_default=None, allow_none=True, data_key="projectId")
     lead_id = fields.Integer(load_default=None, allow_none=True, data_key="leadId")
     cohort_id = fields.Integer(load_default=None, allow_none=True, data_key="cohortId")
 
 
 class LoginHourRecordSchema(Schema):
+    project_name = fields.Method("get_project_name", dump_only=True, data_key="projectName")
+
+    def get_project_name(self, record):
+        return record.user.project.name if record.user.project else None
+
     id = fields.Integer(dump_only=True)
     batch_id = fields.Integer(dump_only=True, data_key="batchId")
     user_id = fields.Integer(dump_only=True, data_key="userId")
